@@ -7,123 +7,40 @@
 
    The estimated pose is
 """
-import numpy as np
-import cv2
+# !/usr/bin/env python
 import json
 from artelib.vector import Vector
 from artelib.rotationmatrix import RotationMatrix
 from artelib.homogeneousmatrix import HomogeneousMatrix
 import os
-
-
-def detect_arucos(image, show=True, aruco_size=0.15):
-    # The dictionary should be defined as the one used in demos/aruco_markers/aruco_creation.py
-    # aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
-    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-    try:
-        with open(CALIB_FILE) as file:
-            data = json.load(file)
-    except:
-        print('Camera Calibration File not valid')
-        exit()
-
-    cameraMatrix = np.array(data['camera_matrix'])
-    distCoeffs = np.array(data['distortion_coefficients'])
-
-    gray_image = cv2.imread(image)
-    # gray_image = cv2.cvtColor(gray_image, cv2.COLOR_BGR2GRAY)
-
-    if show:
-        cv2.imshow('aruco_detect', gray_image)
-        cv2.waitKey(100)
-    # detect markers
-    corners, ids, rejectedImgPoints = cv2.aruco.detectMarkers(gray_image, aruco_dict)
-    if len(corners) > 0:
-        rvecs, tvecs, _objPoints = cv2.aruco.estimatePoseSingleMarkers(corners,
-                                                                       aruco_size,
-                                                                       cameraMatrix,
-                                                                       distCoeffs)
-
-    if show:
-        print('Press key!')
-        cv2.imshow('aruco_detect', gray_image)
-        cv2.waitKey(100)
-        dispimage = cv2.aruco.drawDetectedMarkers(gray_image, corners, ids, borderColor=(0, 0, 255))
-        # display corner order (Board file)
-        for item in corners:
-            for i in range(4):
-                cv2.putText(dispimage, str(i), item[0, i].astype(int), cv2.FONT_HERSHEY_DUPLEX, 0.4, (255, 0, 0), 1,
-                            cv2.LINE_AA)
-        if len(corners) > 0:
-            # Draw axis for each marker
-            for i in range(len(rvecs)):
-                dispimage = cv2.drawFrameAxes(dispimage, cameraMatrix, distCoeffs, rvecs[i], tvecs[i],
-                                              length=0.2,
-                                              thickness=2)
-
-        cv2.imshow('aruco_detect', dispimage)
-        cv2.waitKey(1000)
-
-    if len(corners) > 0:
-        # compute homogeneous matrices
-        tranformations = []
-        for i in range(len(rvecs)):
-            translation = Vector(tvecs[i][0])
-            rotation, _ = cv2.Rodrigues(rvecs[i][0])
-            rotation = RotationMatrix(rotation)
-            Trel = HomogeneousMatrix(translation,
-                                     rotation)
-            tranformations.append(Trel)
-        return ids, tranformations
-    return None, None
-
-
-if __name__ == "__main__":
-    # reading directory files
-    directory = './aruco_markers/real_images/'
-    directory_list = sorted(os.listdir(directory))
-    aruco_size = 0.21 # ARUCO size in meters
-    show = True
-
-    # process each image. For each image, present the Camera-ARUCO transformation and the Euclidean distance camera-ARUCO
-    for image in directory_list:
-        print('Processing image: ', directory+image)
-        ids, transformations = detect_arucos(image=directory+image, show=show, aruco_size=aruco_size)
-        if ids is None:
-            continue
-
-        for i in range(len(ids)):
-            print('Found ARUCOS with id: ', ids[i])
-            print('Camera-->ARUCO transformation:')
-            transformations[i].print_nice()
-            print('Distance (m): ', np.linalg.norm(transformations[i].pos()))
-            print('Inverse:')
-            it=transformations[i].inv()
-            it.print_nice()
-
-# !/usr/bin/env python
 import rospy
 import cv2
 import cv2.aruco as aruco
 import numpy as np
 from sensor_msgs.msg import Image
-from geometry_msgs.msg import TransformStamped
-from std_msgs.msg import Float64MultiArray
+#from geometry_msgs.msg import TransformStamped
+#from std_msgs.msg import Float64MultiArray
+from geometry_msgs.msg import PoseStamped, Point, Quaternion
+from std_msgs.msg import String
+#from aruco_msgs.msg import MarkerArray
 from cv_bridge import CvBridge
 
-IMATE_TOPIC = "/camera/image_raw"
+IMAGE_TOPIC = "/visible_image"
 CALIB_FILE = 'camera_calib.json'  # default camera calibration file
+ARUCO_SIZE = 0.21
 
 class ArucoMarkerListener:
     def __init__(self):
+        print('INIT ARUCO LISTENER')           
+        
         # Initialize ROS Node
         rospy.init_node('aruco_marker_listener', anonymous=True)
 
         # Create a ROS image subscriber to listen to image topic
-        self.image_sub = rospy.Subscriber(IMATE_TOPIC, Image, self.image_callback)
+        self.image_sub = rospy.Subscriber(IMAGE_TOPIC, Image, self.image_callback)
 
         # Publisher for publishing the homogeneous transformation matrix with timestamp
-        self.matrix_pub = rospy.Publisher("/aruco_transformation_matrix", Float64MultiArray, queue_size=10)
+        self.pose_pub = rospy.Publisher("/aruco_observation", PoseStamped, queue_size=10)
 
         # Initialize CvBridge to convert ROS images to OpenCV images
         self.bridge = CvBridge()
@@ -150,9 +67,14 @@ class ArucoMarkerListener:
             return
 
         show = True
+        print('Image callback')
 
         # Detect ARUCO markers
         gray_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+        gray_image = cv2.bilateralFilter(gray_image, 15, 75, 75)     
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        gray_image = clahe.apply(gray_image)
+
 
         if show:
             cv2.imshow('aruco_detect', gray_image)
@@ -161,7 +83,7 @@ class ArucoMarkerListener:
         corners, ids, rejectedImgPoints = cv2.aruco.detectMarkers(gray_image, self.aruco_dict)
         if len(corners) > 0:
             rvecs, tvecs, _objPoints = cv2.aruco.estimatePoseSingleMarkers(corners,
-                                                                           aruco_size,
+                                                                           ARUCO_SIZE,
                                                                            self.camera_matrix,
                                                                            self.dist_coeffs)
 
@@ -193,7 +115,7 @@ class ArucoMarkerListener:
                 rotation = RotationMatrix(rotation)
                 Trel = HomogeneousMatrix(translation,
                                          rotation)
-                self.publish_matrix_with_timestamp(Trel.toarray(), ids[i], msg.stamp)
+                self.publish_matrix_with_timestamp(T=Trel, aruco_id=ids[i][0], timestamp=msg.header.stamp)
             return
         print('NO ARUCO COULD BE EXTRACTED')
         rospy.loginfo(f"NO ARUCO COULD BE EXTRACTED.")
@@ -204,22 +126,29 @@ class ArucoMarkerListener:
         is employed to publish the ARUCO id
         """
         rospy.loginfo(f"Homogeneous Transformation Matrix:\n{T}")
-        rospy.loginfo(f"FOUND ARUCO id", aruco_id)
-        T_flatten = T.flatten().tolist()  # Flatten the 4x4 matrix to a 1D array
-        T_flatten[-1] = float(aruco_id)
-        # Create a message to publish the matrix
-        matrix_msg = Float64MultiArray()
-        matrix_msg.data = T_flatten
+        rospy.loginfo(f"FOUND ARUCO id: {aruco_id}")        
+    
+        position = T.pos()
+        # caution is a Homogeneous matrix from pyARTE
+        # caution, order. [0, 1, 2, 3] = the quternion is in this library w, x, y, z
+        quaternion = T.Q().toarray()
 
-        # Set the header timestamp to the current time
-        # matrix_msg.header.stamp = rospy.Time.now()
-        matrix_msg.header.stamp = timestamp
+        msg_pose = PoseStamped()        
+        msg_pose.header.stamp = timestamp
+        msg_pose.header.frame_id = str(aruco_id)
 
-        # Set frame_id (optional, for clarity)
-        matrix_msg.header.frame_id = "camera_link"
+        msg_pose.pose.position.x = position[0]
+        msg_pose.pose.position.y = position[1]
+        msg_pose.pose.position.z = position[2]
 
-        # Publish the matrix message
-        self.matrix_pub.publish(matrix_msg)
+        msg_pose.pose.orientation.x = quaternion[1]
+        msg_pose.pose.orientation.y = quaternion[2]
+        msg_pose.pose.orientation.z = quaternion[3]
+        msg_pose.pose.orientation.w = quaternion[0]
+
+        self.pose_pub.publish(msg_pose)
+        
+        
 
 
 
